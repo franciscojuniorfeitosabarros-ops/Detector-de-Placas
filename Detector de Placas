@@ -1,0 +1,134 @@
+import cv2
+import numpy as np
+from ultralytics import YOLO
+import easyocr 
+import torch # Importe o PyTorch explicitamente
+
+# --- ⚠ CORREÇÃO DE ERRO DE PICKLE/SEGURANÇA ---
+# Adiciona a classe da Ultralytics à lista de globals confiáveis do PyTorch.
+try:
+    from ultralytics.nn.tasks import DetectionModel
+    torch.serialization.add_globals({DetectionModel})
+    print(" Ajuste de segurança do PyTorch aplicado.")
+except ImportError:
+    # Caso a estrutura da Ultralytics mude
+    print("Aviso: Falha ao carregar a classe DetectionModel. Tentando continuar.")
+except Exception as e:
+    print(f"Erro ao adicionar globals do PyTorch: {e}")
+
+# --- 1. Configurações e Inicialização ---
+
+# Carrega o modelo diretamente pelo nome da arquitetura (yolov8n)
+model = YOLO('yolov8n') 
+
+# IDs das classes que representam veículos no modelo COCO
+CLASSES_VEICULOS = [2, 3, 5, 7] 
+
+# Inicializar o leitor EasyOCR
+try:
+    reader = easyocr.Reader(['pt', 'en'])
+except Exception as e:
+    print(f"Erro ao inicializar o EasyOCR. Verifique a instalação. Detalhe: {e}")
+    reader = None
+
+# Inicializar a captura de vídeo
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    print("Erro: Não foi possível acessar a câmera.")
+    exit()
+
+print(" Sistema LPR Inicializado (Pressione 'q' para sair).")
+print("Atenção: A precisão da leitura depende da qualidade da imagem e da distância.")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # 2. Detecção de Veículos com YOLO
+    results = model(frame, conf=0.5, verbose=False)
+
+    if not results:
+        continue
+        
+    for box in results[0].boxes:
+        class_id = int(box.cls)
+        
+        # Filtra apenas veículos
+        if class_id in CLASSES_VEICULOS:
+            # Coordenadas do Veículo
+            coords = box.xyxy[0].cpu().numpy().astype(int)
+            x1_veiculo, y1_veiculo, x2_veiculo, y2_veiculo = coords
+            
+            # --- Desenho da Detecção do Veículo (Azul) ---
+            cv2.rectangle(frame, 
+                          (x1_veiculo, y1_veiculo), 
+                          (x2_veiculo, y2_veiculo), 
+                          (255, 0, 0), 2)
+            
+            # Label do Veículo
+            label = model.names[class_id]
+            cv2.putText(frame, label, 
+                        (x1_veiculo, y1_veiculo - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, 
+                        (255, 0, 0), 2)
+            
+            # 3. Definição do ROI (Região de Interesse) para a Placa
+            
+            h = y2_veiculo - y1_veiculo
+            w = x2_veiculo - x1_veiculo
+            
+            # Coordenadas do ROI da Placa (Retângulo Verde)
+            plate_x1 = x1_veiculo + int(w * 0.25) 
+            plate_x2 = x2_veiculo - int(w * 0.25) 
+            plate_y1 = y1_veiculo + int(h * 0.75) 
+            plate_y2 = y2_veiculo - int(h * 0.05) 
+            
+            # Ajusta as coordenadas para os limites do frame
+            plate_x1 = np.clip(plate_x1, 0, frame.shape[1])
+            plate_y1 = np.clip(plate_y1, 0, frame.shape[0])
+            plate_x2 = np.clip(plate_x2, 0, frame.shape[1])
+            plate_y2 = np.clip(plate_y2, 0, frame.shape[0])
+
+            # --- Desenho do ROI da Placa (Verde, como no SPIA) ---
+            cv2.rectangle(frame, 
+                          (plate_x1, plate_y1), 
+                          (plate_x2, plate_y2), 
+                          (0, 255, 0), 2)
+            
+            # 4. Processamento da Placa (LPR/OCR)
+            placa_texto = "Processando..."
+            
+            if reader and plate_y2 > plate_y1 and plate_x2 > plate_x1:
+                plate_roi = frame[plate_y1:plate_y2, plate_x1:plate_x2]
+                
+                # Aplica o EasyOCR
+                results_ocr = reader.readtext(plate_roi, 
+                                              allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-', 
+                                              detail=0)
+
+                if results_ocr:
+                    placas_validas = [text for text in results_ocr if len(text) >= 7 and len(text) <= 10]
+                    if placas_validas:
+                        placa_texto = placas_validas[0].replace(' ', '').upper()
+                    else:
+                        placa_texto = "Placa NAO Detectada/Lida"
+                else:
+                    placa_texto = "Sem caracteres lidos"
+
+            # 5. Exibir o Resultado da Placa no Frame (Verde)
+            cv2.putText(frame, placa_texto, 
+                        (plate_x1, plate_y1 - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, 
+                        (0, 255, 0), 2)
+
+
+    # 6. Exibir o Frame
+    cv2.imshow('Simulacao de ANPR (YOLO + EasyOCR) - Pressione Q para Sair', frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
